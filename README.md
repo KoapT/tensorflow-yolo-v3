@@ -68,3 +68,5 @@ To run demo type this in the command line:
         1. Desired iou threshold
     8. `--gpu_memory_fraction`
         1. Fraction of gpu memory to work with
+    9. '--keep_aspect_ratio'
+        1. keep the images' aspect ratio while resizing.
