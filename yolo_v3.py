@@ -14,13 +14,18 @@ _ANCHORS = [(10, 13), (16, 30), (33, 23),
             (116, 90), (156, 198), (373, 326)]
 
 
+# _ANCHORS = [(18,18), (53,64), (55,121),
+#             (121,97), (89,200), (145,347),
+#             (258,236), (260,473), (436,347)]    #bird-person anchor
+# 18,18,  53,64,  55,121,  121,97,  89,200,  145,347,  258,236,  260,473,  436,347
+
 def darknet53(inputs):
     """
     Builds Darknet-53 model.
     """
     inputs = _conv2d_fixed_padding(inputs, 32, 3)
     inputs = _conv2d_fixed_padding(inputs, 64, 3, strides=2)
-    inputs = _darknet53_block(inputs, 32)
+    inputs = _darknet53_block(inputs, 32)  # residual block
     inputs = _conv2d_fixed_padding(inputs, 128, 3, strides=2)
 
     for i in range(2):
@@ -63,12 +68,59 @@ def _darknet53_block(inputs, filters):
     return inputs
 
 
-def _spp_block(inputs, data_format='NCHW'):
-    return tf.concat([slim.max_pool2d(inputs, 13, 1, 'SAME'),
-                      slim.max_pool2d(inputs, 9, 1, 'SAME'),
-                      slim.max_pool2d(inputs, 5, 1, 'SAME'),
-                      inputs],
-                     axis=1 if data_format == 'NCHW' else 3)
+def _bottleneck_layer(inputs, filters):
+    inputs = _conv2d_fixed_padding(inputs, 4 * filters, 1)
+    inputs = _conv2d_fixed_padding(inputs, filters, 3)
+    return inputs
+
+
+def _transition_layer(inputs, data_format):  # 152x152x80
+    input_filters = inputs.get_shape().as_list()[1] if data_format == 'NCHW' \
+        else inputs.get_shape().as_list()[-1]
+    inputs = _conv2d_fixed_padding(inputs, input_filters // 2, 1)
+    inputs = slim.max_pool2d(
+        inputs, [2, 2], stride=2)
+    return inputs
+
+
+def _dense_block(inputs, filters, nb_layers, data_format):
+    layers_concat = list()
+    layers_concat.append(inputs)
+
+    inputs = _bottleneck_layer(inputs, filters)
+
+    layers_concat.append(inputs)
+
+    for i in range(nb_layers - 1):
+        inputs = tf.concat(layers_concat, axis=1 if data_format == 'NCHW' else 3)
+        inputs = _bottleneck_layer(inputs, filters)
+        layers_concat.append(inputs)
+
+    inputs = tf.concat(layers_concat,
+                       axis=1 if data_format == 'NCHW' else 3)
+
+    return inputs
+
+
+def DensenetForYolo(inputs, data_format='NHWC'):
+    '''
+    Build Densenet model
+    '''
+    inputs = _conv2d_fixed_padding(inputs, 32, 7, strides=2)
+    inputs = _conv2d_fixed_padding(inputs, 64, 3, strides=2)
+
+    for i in range(3):
+        inputs = _dense_block(inputs, 16, 4, data_format)
+        inputs = _transition_layer(inputs, data_format)
+
+        if i == 0:
+            route_1 = inputs
+
+        if i == 1:
+            route_2 = inputs
+    inputs = _dense_block(inputs, 16, 4, data_format)
+
+    return route_1, route_2, inputs
 
 
 @tf.contrib.framework.add_arg_scope
@@ -103,15 +155,10 @@ def _fixed_padding(inputs, kernel_size, *args, mode='CONSTANT', **kwargs):
     return padded_inputs
 
 
-def _yolo_block(inputs, filters, data_format='NCHW', with_spp=False):
+def _yolo_block(inputs, filters):
     inputs = _conv2d_fixed_padding(inputs, filters, 1)
     inputs = _conv2d_fixed_padding(inputs, filters * 2, 3)
     inputs = _conv2d_fixed_padding(inputs, filters, 1)
-
-    if with_spp:
-        inputs = _spp_block(inputs, data_format)
-        inputs = _conv2d_fixed_padding(inputs, filters, 1)
-
     inputs = _conv2d_fixed_padding(inputs, filters * 2, 3)
     inputs = _conv2d_fixed_padding(inputs, filters, 1)
     route = inputs
@@ -139,7 +186,7 @@ def _detection_layer(inputs, num_classes, anchors, img_size, data_format):
 
     if data_format == 'NCHW':
         predictions = tf.reshape(
-            predictions, [-1, num_anchors * bbox_attrs, dim])
+            predictions, [-1, num_anchors * bbox_attrs, dim])  # ?????????/
         predictions = tf.transpose(predictions, [0, 2, 1])
 
     predictions = tf.reshape(predictions, [-1, num_anchors * dim, bbox_attrs])
@@ -165,7 +212,7 @@ def _detection_layer(inputs, num_classes, anchors, img_size, data_format):
     x_y_offset = tf.reshape(tf.tile(x_y_offset, [1, num_anchors]), [1, -1, 2])
 
     box_centers = box_centers + x_y_offset
-    box_centers = box_centers * stride
+    box_centers = box_centers * stride  # 得到了真实坐标
 
     anchors = tf.tile(anchors, [dim, 1])
     box_sizes = tf.exp(box_sizes) * anchors
@@ -178,7 +225,7 @@ def _detection_layer(inputs, num_classes, anchors, img_size, data_format):
     return predictions
 
 
-def _upsample(inputs, out_shape, data_format='NCHW'):
+def _upsample(inputs, out_shape, data_format='NHWC'):
     # tf.image.resize_nearest_neighbor accepts input in format NHWC
     if data_format == 'NCHW':
         inputs = tf.transpose(inputs, [0, 2, 3, 1])
@@ -200,7 +247,7 @@ def _upsample(inputs, out_shape, data_format='NCHW'):
     return inputs
 
 
-def yolo_v3(inputs, num_classes, is_training=False, data_format='NCHW', reuse=False, with_spp=False):
+def yolo_v3(inputs, num_classes, is_training=False, data_format='NHWC', reuse=False):
     """
     Creates YOLO v3 model.
 
@@ -210,7 +257,6 @@ def yolo_v3(inputs, num_classes, is_training=False, data_format='NCHW', reuse=Fa
     :param is_training: whether is training or not.
     :param data_format: data format NCHW or NHWC.
     :param reuse: whether or not the network and its variables should be reused.
-    :param with_spp: whether or not is using spp layer.
     :return:
     """
     # it will be needed later on
@@ -242,8 +288,7 @@ def yolo_v3(inputs, num_classes, is_training=False, data_format='NCHW', reuse=Fa
                 route_1, route_2, inputs = darknet53(inputs)
 
             with tf.variable_scope('yolo-v3'):
-                route, inputs = _yolo_block(inputs, 512, data_format, with_spp)
-
+                route, inputs = _yolo_block(inputs, 512)
                 detect_1 = _detection_layer(
                     inputs, num_classes, _ANCHORS[6:9], img_size, data_format)
                 detect_1 = tf.identity(detect_1, name='detect_1')
@@ -277,9 +322,9 @@ def yolo_v3(inputs, num_classes, is_training=False, data_format='NCHW', reuse=Fa
                 return detections
 
 
-def yolo_v3_spp(inputs, num_classes, is_training=False, data_format='NCHW', reuse=False):
+def dense_yolo_v3(inputs, num_classes, is_training=False, data_format='NHWC', reuse=False):
     """
-    Creates YOLO v3 with SPP  model.
+    Creates YOLO v3 model.
 
     :param inputs: a 4-D tensor of size [batch_size, height, width, channels].
         Dimension batch_size may be undefined. The channel order is RGB.
@@ -289,4 +334,71 @@ def yolo_v3_spp(inputs, num_classes, is_training=False, data_format='NCHW', reus
     :param reuse: whether or not the network and its variables should be reused.
     :return:
     """
-    return yolo_v3(inputs, num_classes, is_training=is_training, data_format=data_format, reuse=reuse, with_spp=True)
+    # it will be needed later on
+    img_size = inputs.get_shape().as_list()[1:3]
+
+    # transpose the inputs to NCHW
+    if data_format == 'NCHW':
+        inputs = tf.transpose(inputs, [0, 3, 1, 2])
+
+    # normalize values to range [0..1]
+    inputs = inputs / 255
+
+    # set batch norm params
+    batch_norm_params = {
+        'decay': _BATCH_NORM_DECAY,
+        'epsilon': _BATCH_NORM_EPSILON,
+        'scale': True,
+        'is_training': is_training,
+        'fused': None,  # Use fused batch norm if possible.
+    }
+
+    # Set activation_fn and parameters for conv2d, batch_norm.
+    with slim.arg_scope([slim.conv2d, slim.batch_norm, _fixed_padding, slim.max_pool2d], data_format=data_format):
+        with slim.arg_scope([slim.conv2d, slim.batch_norm, _fixed_padding], reuse=reuse):
+            with slim.arg_scope([slim.conv2d], normalizer_fn=slim.batch_norm,
+                                normalizer_params=batch_norm_params,
+                                biases_initializer=None,
+                                activation_fn=lambda x: tf.nn.leaky_relu(x, alpha=_LEAKY_RELU)):
+                with tf.variable_scope('densenet'):
+                    route_1, route_2, inputs = DensenetForYolo(inputs, data_format)
+
+                with tf.variable_scope('yolo-v3'):
+                    inputs = _dense_block(inputs, 16, 2, data_format)
+                    route = inputs
+                    inputs = _conv2d_fixed_padding(inputs, 128, 3)
+
+                    detect_1 = _detection_layer(
+                        inputs, num_classes, _ANCHORS[6:9], img_size, data_format)
+                    detect_1 = tf.identity(detect_1, name='detect_1')
+
+                    upsample_size = route_2.get_shape().as_list()
+                    inputs = _conv2d_fixed_padding(route, upsample_size[-1] // 2, 3)
+                    inputs = _upsample(inputs, upsample_size, data_format)
+                    inputs = tf.concat([inputs, route_2],
+                                       axis=1 if data_format == 'NCHW' else 3)
+
+                    inputs = _dense_block(inputs, 16, 2, data_format)
+                    route = inputs
+                    inputs = _conv2d_fixed_padding(inputs, 64, 3)
+
+                    detect_2 = _detection_layer(
+                        inputs, num_classes, _ANCHORS[3:6], img_size, data_format)
+                    detect_2 = tf.identity(detect_2, name='detect_2')
+
+                    upsample_size = route_1.get_shape().as_list()
+                    inputs = _conv2d_fixed_padding(route, upsample_size[-1] // 2, 3)
+                    inputs = _upsample(inputs, upsample_size, data_format)
+                    inputs = tf.concat([inputs, route_1],
+                                       axis=1 if data_format == 'NCHW' else 3)
+
+                    inputs = _dense_block(inputs, 16, 2, data_format)
+                    inputs = _conv2d_fixed_padding(inputs, 32, 3)
+
+                    detect_3 = _detection_layer(
+                        inputs, num_classes, _ANCHORS[0:3], img_size, data_format)
+                    detect_3 = tf.identity(detect_3, name='detect_3')
+
+                    detections = tf.concat([detect_1, detect_2, detect_3], axis=1)
+                    detections = tf.identity(detections, name='detections')
+                    return detections
