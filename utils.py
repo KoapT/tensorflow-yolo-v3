@@ -97,7 +97,7 @@ def load_weights(var_list, weights_file):
                     vari_weights = weights[ptr:ptr + num_params].reshape(shape)
                     ptr += num_params
                     assign_ops.append(
-                        tf.assign(vari, vari_weights, validate_shape=True))  # tf.sssign() 给变量赋值
+                        tf.assign(vari, vari_weights, validate_shape=True))  # tf.sssign() Assign a value to a variable
 
                 # we move the pointer by 4, because we loaded 4 variables
                 i += 4
@@ -213,14 +213,14 @@ def non_max_suppression(predictions_with_boxes, confidence_threshold, iou_thresh
 
         for cls in unique_classes:
             cls_mask = classes == cls
-            cls_boxes = bbox_attrs[np.nonzero(cls_mask)]  # 得到该类的所有boxes
-            cls_boxes = cls_boxes[cls_boxes[:, -1].argsort()[::-1]]  # np.argsort() 对数列从小到大排序，返回序号
-            cls_scores = cls_boxes[:, -1]  # 最后一列表示得分（置信度）
-            cls_boxes = cls_boxes[:, :-1]  # 前四列是box位置信息
+            cls_boxes = bbox_attrs[np.nonzero(cls_mask)]  # get all the boxes of this class
+            cls_boxes = cls_boxes[cls_boxes[:, -1].argsort()[::-1]]  # np.argsort() sort from min to max，return the index.
+            cls_scores = cls_boxes[:, -1]  # the last column refers score
+            cls_boxes = cls_boxes[:, :-1]  # the fore 4 columns refers the location
 
             while len(cls_boxes) > 0:
                 box = cls_boxes[0]
-                score = cls_scores[0]  # 先选择置信度最大的box和score作为基准
+                score = cls_scores[0]  # choose the most confident box&score, as the baseline
                 if cls not in result:
                     result[cls] = []
                 result[cls].append((box, score))
